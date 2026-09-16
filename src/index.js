@@ -1,3 +1,6 @@
+const IMAGE_URL =
+  "https://raw.githubusercontent.com/46jfw59vrw-creator/Yargiconfigv5/main/public/site.png";
+
 const COOKIE = "yc_session";
 const SESSION_DAYS = 7;
 
@@ -6,12 +9,46 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    if (request.method === "GET" && path === "/") {
-      return page();
+    if (path === "/site.png") {
+      return fetch(IMAGE_URL);
     }
 
-    if (request.method === "GET" && path === "/panel") {
-      return panel();
+    if (path === "/") {
+      return new Response(`
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>YargiConfig</title>
+<style>
+html,body{margin:0;padding:0;background:#000}
+img{display:block;width:100%;height:auto}
+a{position:absolute;display:block}
+.page{position:relative;width:100%;max-width:1920px;margin:auto}
+</style>
+</head>
+<body>
+<div class="page">
+<img src="/site.png" alt="YargiConfig">
+<a href="https://t.me/ioscedrixddconfig"
+style="left:35%;top:58%;width:30%;height:8%;"></a>
+</div>
+</body>
+</html>
+`, {
+        headers: {
+          "content-type": "text/html; charset=UTF-8"
+        }
+      });
+    }
+
+    if (path === "/panel") {
+      return new Response(PANEL_HTML, {
+        headers: {
+          "content-type": "text/html; charset=UTF-8"
+        }
+      });
     }
 
     if (path === "/api/login" && request.method === "POST") {
@@ -19,894 +56,549 @@ export default {
     }
 
     if (path === "/api/logout" && request.method === "POST") {
-      return logout(request);
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: {
+          "content-type": "application/json",
+          "Set-Cookie":
+            `${COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict`
+        }
+      });
     }
 
-    if (path === "/api/me" && request.method === "GET") {
-      return me(request, env);
+    const admin = await authenticate(request, env);
+
+    if (!admin) {
+      return json({ error: "Yetkisiz" }, 401);
     }
 
-    if (path.startsWith("/api/")) {
-      const user = await auth(request, env);
-
-      if (!user) {
-        return json({ error: "unauthorized" }, 401);
-      }
-
-      if (path === "/api/settings" && request.method === "GET") {
-        return settings(env);
-      }
-
-      if (path === "/api/settings" && request.method === "PUT") {
-        return updateSettings(request, env);
-      }
-
-      if (path === "/api/posts" && request.method === "GET") {
-        return posts(env);
-      }
-
-      if (path === "/api/posts" && request.method === "POST") {
-        return createPost(request, env);
-      }
-
-      if (
-        path.startsWith("/api/posts/") &&
-        request.method === "DELETE"
-      ) {
-        return deletePost(path.split("/").pop(), env);
-      }
+    if (path === "/api/me") {
+      return json({
+        ok: true,
+        username: admin.username
+      });
     }
 
-    if (path === "/site.png") {
-      return env.ASSETS.fetch(
-        new Request(new URL("/site.png", request.url))
-      );
+    if (path === "/api/settings" && request.method === "GET") {
+      const result = await env.DB
+        .prepare("SELECT key,value FROM settings")
+        .all();
+
+      const settings = {};
+
+      for (const row of result.results) {
+        settings[row.key] = row.value;
+      }
+
+      return json(settings);
     }
 
-    return new Response("Not found", { status: 404 });
+    if (path === "/api/settings" && request.method === "PUT") {
+      const data = await request.json();
+
+      for (const [key, value] of Object.entries(data)) {
+        await env.DB
+          .prepare(
+            "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value"
+          )
+          .bind(key, String(value))
+          .run();
+      }
+
+      return json({ ok: true });
+    }
+
+    if (path === "/api/posts" && request.method === "GET") {
+      const result = await env.DB
+        .prepare(
+          "SELECT id,title,version,status,description,link,created_at FROM posts ORDER BY id DESC"
+        )
+        .all();
+
+      return json(result.results);
+    }
+
+    if (path === "/api/posts" && request.method === "POST") {
+      const data = await request.json();
+
+      await env.DB
+        .prepare(`
+          INSERT INTO posts
+          (title,version,status,description,link,created_at)
+          VALUES(?,?,?,?,?,?)
+        `)
+        .bind(
+          data.title || "",
+          data.version || "",
+          data.status || "Taslak",
+          data.description || "",
+          data.link || "",
+          new Date().toISOString()
+        )
+        .run();
+
+      return json({ ok: true });
+    }
+
+    if (path.startsWith("/api/posts/") && request.method === "DELETE") {
+      const id = path.split("/").pop();
+
+      await env.DB
+        .prepare("DELETE FROM posts WHERE id=?")
+        .bind(id)
+        .run();
+
+      return json({ ok: true });
+    }
+
+    return new Response("404", { status: 404 });
   }
 };
 
 async function login(request, env) {
-  const body = await request.json().catch(() => ({}));
+  const data = await request.json();
 
-  const username = String(body.username || "");
-  const password = String(body.password || "");
-
-  if (!username || !password) {
-    return json(
-      { error: "KullanÄ±cÄ± adÄ± ve Åifre gerekli" },
-      400
-    );
+  if (!data.username || !data.password) {
+    return json({ error: "KullanÄ±cÄ± adÄ± ve Åifre gerekli" }, 400);
   }
 
   const admin = await env.DB
     .prepare(
-      "SELECT id, username, password_hash FROM admins WHERE username=?"
+      "SELECT id,username,password_hash FROM admins WHERE username=?"
     )
-    .bind(username)
+    .bind(data.username)
     .first();
 
-  if (
-    !admin ||
-    (await sha256(password)) !== admin.password_hash
-  ) {
-    return json(
-      { error: "GiriÅ bilgileri hatalÄ±" },
-      401
-    );
+  if (!admin) {
+    return json({ error: "KullanÄ±cÄ± adÄ± veya Åifre hatalÄ±" }, 401);
   }
 
-  const token =
-    crypto.randomUUID() + "." + crypto.randomUUID();
+  const hash = await sha256(data.password);
 
-  const hash = await sha256(token);
+  if (hash !== admin.password_hash) {
+    return json({ error: "KullanÄ±cÄ± adÄ± veya Åifre hatalÄ±" }, 401);
+  }
+
+  const token = crypto.randomUUID() + "-" + crypto.randomUUID();
+  const tokenHash = await sha256(token);
 
   const expires =
     Math.floor(Date.now() / 1000) +
-    SESSION_DAYS * 86400;
+    SESSION_DAYS * 24 * 60 * 60;
 
   await env.DB
     .prepare(
       "INSERT INTO sessions(token_hash,admin_id,expires_at) VALUES(?,?,?)"
     )
-    .bind(hash, admin.id, expires)
+    .bind(tokenHash, admin.id, expires)
     .run();
 
-  return json(
-    { ok: true },
-    200,
-    {
+  return new Response(JSON.stringify({
+    ok: true
+  }), {
+    headers: {
+      "content-type": "application/json",
       "Set-Cookie":
         `${COOKIE}=${token}; Path=/; Max-Age=${SESSION_DAYS * 86400}; HttpOnly; Secure; SameSite=Strict`
     }
-  );
-}
-
-async function auth(request, env) {
-  const token = cookie(request, COOKIE);
-
-  if (!token) {
-    return null;
-  }
-
-  const hash = await sha256(token);
-  const now = Math.floor(Date.now() / 1000);
-
-  const session = await env.DB
-    .prepare(
-      `SELECT admins.id, admins.username
-       FROM sessions
-       JOIN admins ON admins.id = sessions.admin_id
-       WHERE sessions.token_hash=?
-       AND sessions.expires_at>?`
-    )
-    .bind(hash, now)
-    .first();
-
-  return session || null;
-}
-
-async function logout(request) {
-  return new Response(
-    JSON.stringify({ ok: true }),
-    {
-      headers: {
-        "content-type": "application/json",
-        "Set-Cookie":
-          `${COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict`
-      }
-    }
-  );
-}
-
-async function me(request, env) {
-  const user = await auth(request, env);
-
-  if (!user) {
-    return json({ ok: false }, 401);
-  }
-
-  return json({
-    ok: true,
-    username: user.username
   });
 }
 
-async function settings(env) {
-  const rows = await env.DB
-    .prepare("SELECT key,value FROM settings")
-    .all();
+async function authenticate(request, env) {
+  const cookie = request.headers.get("Cookie") || "";
 
-  return json(
-    Object.fromEntries(
-      rows.results.map(row => [
-        row.key,
-        row.value
-      ])
-    )
+  const match = cookie.match(
+    new RegExp(`${COOKIE}=([^;]+)`)
   );
-}
 
-async function updateSettings(request, env) {
-  const body = await request.json();
+  if (!match) return null;
 
-  for (const [key, value] of Object.entries(body)) {
-    await env.DB
-      .prepare(
-        `INSERT INTO settings(key,value)
-         VALUES(?,?)
-         ON CONFLICT(key)
-         DO UPDATE SET value=excluded.value`
-      )
-      .bind(key, String(value))
-      .run();
-  }
+  const tokenHash = await sha256(match[1]);
 
-  return settings(env);
-}
-
-async function posts(env) {
-  const result = await env.DB
-    .prepare(
-      "SELECT * FROM posts ORDER BY created_at DESC"
-    )
-    .all();
-
-  return json(result.results);
-}
-
-async function createPost(request, env) {
-  const body = await request.json();
-
-  if (!body.title) {
-    return json(
-      { error: "BaÅlÄ±k gerekli" },
-      400
-    );
-  }
-
-  await env.DB
-    .prepare(
-      `INSERT INTO posts
-       (title,version,status,description,link,created_at)
-       VALUES(?,?,?,?,?,?)`
-    )
+  const row = await env.DB
+    .prepare(`
+      SELECT admins.id,admins.username
+      FROM sessions
+      JOIN admins ON admins.id=sessions.admin_id
+      WHERE sessions.token_hash=?
+      AND sessions.expires_at>?
+    `)
     .bind(
-      body.title,
-      body.version || "",
-      body.status || "Yeni",
-      body.description || "",
-      body.link || "",
-      new Date().toISOString()
+      tokenHash,
+      Math.floor(Date.now() / 1000)
     )
-    .run();
+    .first();
 
-  return posts(env);
+  return row || null;
 }
 
-async function deletePost(id, env) {
-  await env.DB
-    .prepare("DELETE FROM posts WHERE id=?")
-    .bind(id)
-    .run();
+async function sha256(text) {
+  const data = new TextEncoder().encode(text);
 
-  return posts(env);
-}
+  const hash = await crypto.subtle.digest(
+    "SHA-256",
+    data
+  );
 
-async function sha256(value) {
-  const buffer =
-    await crypto.subtle.digest(
-      "SHA-256",
-      new TextEncoder().encode(value)
-    );
-
-  return [...new Uint8Array(buffer)]
-    .map(
-      byte =>
-        byte.toString(16).padStart(2, "0")
-    )
+  return [...new Uint8Array(hash)]
+    .map(x => x.toString(16).padStart(2, "0"))
     .join("");
 }
 
-function cookie(request, name) {
-  const cookies =
-    request.headers.get("Cookie") || "";
-
-  const regex = new RegExp(
-    "(?:^|; )" +
-    name.replace(
-      /[.*+?^${}()|[\]\\]/g,
-      "\\$&"
-    ) +
-    "=([^;]+)"
-  );
-
-  const match = cookies.match(regex);
-
-  return match && match[1];
-}
-
-function json(data, status = 200, extra = {}) {
+function json(data, status = 200) {
   return new Response(
     JSON.stringify(data),
     {
       status,
       headers: {
-        "content-type":
-          "application/json; charset=utf-8",
-        ...extra
+        "content-type": "application/json; charset=UTF-8"
       }
     }
   );
 }
 
-function page() {
-  return new Response(
-    `<!doctype html>
+const PANEL_HTML = `
+<!DOCTYPE html>
 <html lang="tr">
 <head>
-<meta charset="utf-8">
-<meta name="viewport"
-content="width=device-width,initial-scale=1">
-<title>YargiConfig</title>
-<style>
-body{
-margin:0;
-background:#02060a;
-color:#fff;
-font-family:Arial;
-display:grid;
-place-items:center;
-min-height:100vh
-}
-.wrap{
-width:min(1536px,100%);
-position:relative
-}
-img{
-width:100%;
-height:auto;
-display:block
-}
-.tg{
-position:absolute;
-left:6%;
-top:39%;
-width:23%;
-height:6%;
-display:block
-}
-</style>
-</head>
-<body>
-<div class="wrap">
-<img src="/site.png">
-<a class="tg"
-href="https://t.me/ioscedrixddconfig"></a>
-</div>
-</body>
-</html>`,
-    {
-      headers: {
-        "content-type":
-          "text/html;charset=utf-8"
-      }
-    }
-  );
-}
-
-function panel() {
-  return new Response(
-    PANEL,
-    {
-      headers: {
-        "content-type":
-          "text/html;charset=utf-8"
-      }
-    }
-  );
-}
-
-const PANEL = `<!doctype html>
-<html lang="tr">
-<head>
-<meta charset="utf-8">
-<meta name="viewport"
-content="width=device-width,initial-scale=1">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>YargiConfig Admin</title>
 
 <style>
-*{
-box-sizing:border-box
-}
-
+*{box-sizing:border-box}
 body{
 margin:0;
-background:#03070b;
-color:#eaf3ff;
-font-family:Arial
-}
-
-.wrap{
-max-width:1100px;
-margin:auto;
-padding:25px
-}
-
-.card{
-background:#08121b;
-border:1px solid #1b3548;
-border-radius:14px;
-padding:22px;
-margin-bottom:18px;
-box-shadow:0 15px 45px #0008
-}
-
-h1{
-margin:0 0 5px
-}
-
-h2{
-font-size:18px
-}
-
-.blue{
-color:#0792ff
-}
-
-input,
-textarea,
-select{
-width:100%;
-padding:12px;
-margin:6px 0 12px;
-background:#03090e;
+font-family:Arial,sans-serif;
+background:#080b12;
 color:#fff;
-border:1px solid #263d4d;
-border-radius:8px
+min-height:100vh
 }
-
+.container{
+max-width:1000px;
+margin:auto;
+padding:30px 18px
+}
+.card{
+background:#111722;
+border:1px solid #263246;
+border-radius:16px;
+padding:22px;
+margin-bottom:18px
+}
+h1,h2{margin-top:0}
+input,textarea,select{
+width:100%;
+padding:13px;
+margin:7px 0 12px;
+border-radius:9px;
+border:1px solid #344258;
+background:#080d16;
+color:white
+}
 button{
-padding:12px 17px;
 border:0;
 border-radius:9px;
-background:#078cff;
-color:#fff;
-font-weight:800;
-cursor:pointer
+padding:12px 18px;
+background:#147cff;
+color:white;
+font-weight:bold;
+cursor:pointer;
+margin-right:6px
 }
-
-.danger{
-background:#b52b45
-}
-
-.muted{
-color:#8495a7
-}
-
-.grid{
-display:grid;
-grid-template-columns:
-repeat(3,1fr);
-gap:14px
-}
-
-.stat{
-padding:17px;
-border:1px solid #193044;
-border-radius:12px;
-background:#061018
-}
-
-.stat b{
-display:block;
-color:#0792ff;
-font-size:24px
-}
-
-.hidden{
-display:none
-}
-
+button.red{background:#d33}
+#app{display:none}
 .post{
-padding:12px 0;
-border-top:1px solid #18303e;
-display:flex;
-gap:10px;
-align-items:center
+padding:15px;
+border:1px solid #29364a;
+border-radius:10px;
+margin:10px 0
 }
-
-.post div{
-flex:1
-}
-
-@media(max-width:700px){
-.grid{
-grid-template-columns:1fr
-}
-
-.wrap{
-padding:15px
-}
-}
+.small{color:#9ca9bb;font-size:13px}
 </style>
 </head>
 
 <body>
 
-<div class="wrap">
+<div class="container">
 
 <div id="login" class="card">
 
-<h1>
-â YARGI<span class="blue">CONFIG</span>
-</h1>
+<h1>YargiConfig Admin</h1>
 
-<p class="muted">
-Admin Panel
-</p>
+<input id="username" placeholder="KullanÄ±cÄ± adÄ±">
+<input id="password" type="password" placeholder="Åifre">
 
-<input
-id="u"
-placeholder="KullanÄ±cÄ± adÄ±">
+<button onclick="login()">GiriÅ Yap</button>
 
-<input
-id="p"
-type="password"
-placeholder="Åifre">
-
-<button onclick="login()">
-GiriÅ Yap
-</button>
-
-<p id="err"></p>
+<p id="loginMsg" class="small"></p>
 
 </div>
 
-
-<div id="app" class="hidden">
+<div id="app">
 
 <div class="card">
 
-<h1>
-â YARGI<span class="blue">CONFIG</span>
-</h1>
+<h1>YargiConfig Panel</h1>
 
-<p class="muted">
-YÃ¶netim Paneli
+<p class="small">
+Admin paneline hoÅ geldin.
 </p>
 
-<button onclick="logout()">
-ÃÄ±kÄ±Å
+<button onclick="logout()" class="red">
+ÃÄ±kÄ±Å Yap
 </button>
 
 </div>
 
+<div class="card">
 
-<div class="grid">
+<h2>Ana Sayfa AyarlarÄ±</h2>
 
-<div class="stat">
-<b id="pc">0</b>
-PaylaÅÄ±m
+<label>Hero baÅlÄ±k</label>
+<input id="hero">
+
+<label>Telegram</label>
+<input id="telegram">
+
+<label>Ãye sayÄ±sÄ±</label>
+<input id="members">
+
+<label>PaylaÅÄ±m sayÄ±sÄ±</label>
+<input id="shares">
+
+<button onclick="saveSettings()">
+AyarlarÄ± Kaydet
+</button>
+
 </div>
-
-<div class="stat">
-<b>4.6</b>
-Site sÃ¼rÃ¼mÃ¼
-</div>
-
-<div class="stat">
-<b>â</b>
-Sistem aktif
-</div>
-
-</div>
-
 
 <div class="card">
 
-<h2>
-ð° Yeni PaylaÅÄ±m
-</h2>
+<h2>Yeni PaylaÅÄ±m</h2>
 
-<input
-id="title"
-placeholder="BaÅlÄ±k">
+<input id="title" placeholder="BaÅlÄ±k">
 
-<input
-id="version"
-placeholder="SÃ¼rÃ¼m (Ã¶rn. 4.6)">
+<input id="version" placeholder="SÃ¼rÃ¼m">
 
 <select id="status">
-<option>Yeni</option>
-<option>GÃ¼ncel</option>
+<option>YayÄ±nlandÄ±</option>
 <option>Taslak</option>
+<option>GÃ¼ncelleme</option>
 </select>
 
-<textarea
-id="desc"
-placeholder="AÃ§Ä±klama">
-</textarea>
+<textarea id="description"
+placeholder="AÃ§Ä±klama"></textarea>
 
-<input
-id="link"
-placeholder="Telegram / indirme baÄlantÄ±sÄ±">
+<input id="link"
+placeholder="Ä°ndirme / Telegram baÄlantÄ±sÄ±">
 
 <button onclick="addPost()">
-YayÄ±nla
+PaylaÅÄ±mÄ± Ekle
 </button>
 
 </div>
 
-
 <div class="card">
 
-<h2>
-ð PaylaÅÄ±mlar
-</h2>
+<h2>PaylaÅÄ±mlar</h2>
 
 <div id="posts"></div>
 
 </div>
 
-
-<div class="card">
-
-<h2>
-ð  Ana Sayfa AyarlarÄ±
-</h2>
-
-<input
-id="hero"
-placeholder="Hero baÅlÄ±ÄÄ±">
-
-<input
-id="telegram"
-placeholder="Telegram baÄlantÄ±sÄ±">
-
-<input
-id="members"
-placeholder="Aktif Ã¼ye sayÄ±sÄ±">
-
-<input
-id="shares"
-placeholder="PaylaÅÄ±m sayÄ±sÄ±">
-
-<button onclick="saveSettings()">
-Kaydet
-</button>
-
 </div>
 
 </div>
-
-</div>
-
 
 <script>
 
-async function api(url,opt){
+async function api(url,options={}){
+const r=await fetch(url,{
+credentials:"include",
+...options
+});
 
-let response =
-await fetch(url,opt);
-
-let data =
-await response.json();
-
-if(!response.ok){
-throw Error(
-data.error || "Hata"
-);
+return r.json();
 }
 
-return data;
-}
+async function check(){
 
+const r=await api("/api/me");
 
-async function boot(){
+if(r.ok){
 
-try{
+document.getElementById("login").style.display="none";
+document.getElementById("app").style.display="block";
 
-await api("/api/me");
-
-show();
-
-}catch{}
+loadSettings();
+loadPosts();
 
 }
 
-
-function show(){
-
-loginBox.classList.add(
-"hidden"
-);
-
-app.classList.remove(
-"hidden"
-);
-
-load();
-
 }
-
-
-const loginBox =
-document.getElementById(
-"login"
-);
-
-const app =
-document.getElementById(
-"app"
-);
-
 
 async function login(){
 
-try{
+const username=
+document.getElementById("username").value;
 
-await api(
-"/api/login",
-{
+const password=
+document.getElementById("password").value;
+
+const r=await api("/api/login",{
 method:"POST",
 headers:{
-"content-type":
-"application/json"
+"content-type":"application/json"
 },
 body:JSON.stringify({
-username:u.value,
-password:p.value
+username,
+password
 })
+});
+
+if(r.ok){
+
+document.getElementById("login").style.display="none";
+document.getElementById("app").style.display="block";
+
+loadSettings();
+loadPosts();
+
+}else{
+
+document.getElementById("loginMsg").textContent=
+r.error || "GiriÅ baÅarÄ±sÄ±z";
+
 }
-);
-
-show();
-
-}catch(error){
-
-err.textContent =
-error.message;
-
-err.style.color =
-"#ff6680";
 
 }
-
-}
-
 
 async function logout(){
 
-await api(
-"/api/logout",
-{
+await api("/api/logout",{
 method:"POST"
-}
-);
+});
 
 location.reload();
 
 }
 
+async function loadSettings(){
 
-async function load(){
+const s=await api("/api/settings");
 
-let ps =
-await api("/api/posts");
-
-pc.textContent =
-ps.length;
-
-posts.innerHTML =
-ps.map(
-x => \`
-<div class="post">
-
-<div>
-
-<b>
-\${esc(x.title)}
-</b>
-
-<small class="muted">
-\${esc(x.version || "")}
-Â·
-\${esc(x.status || "")}
-</small>
-
-</div>
-
-<button
-class="danger"
-onclick="del(\${x.id})">
-
-Sil
-
-</button>
-
-</div>
-\`
-).join("")
-||
-'<span class="muted">HenÃ¼z paylaÅÄ±m yok.</span>';
-
-
-let s =
-await api("/api/settings");
-
-hero.value =
-s.hero || "";
-
-telegram.value =
-s.telegram ||
-"https://t.me/ioscedrixddconfig";
-
-members.value =
-s.members || "";
-
-shares.value =
-s.shares || "";
+document.getElementById("hero").value=s.hero||"";
+document.getElementById("telegram").value=s.telegram||"";
+document.getElementById("members").value=s.members||"";
+document.getElementById("shares").value=s.shares||"";
 
 }
-
-
-async function addPost(){
-
-await api(
-"/api/posts",
-{
-method:"POST",
-headers:{
-"content-type":
-"application/json"
-},
-body:JSON.stringify({
-title:title.value,
-version:version.value,
-status:status.value,
-description:desc.value,
-link:link.value
-})
-}
-);
-
-title.value = "";
-version.value = "";
-desc.value = "";
-link.value = "";
-
-load();
-
-}
-
-
-async function del(id){
-
-if(
-confirm(
-"Bu paylaÅÄ±m silinsin mi?"
-)
-){
-
-await api(
-"/api/posts/" + id,
-{
-method:"DELETE"
-}
-);
-
-load();
-
-}
-
-}
-
 
 async function saveSettings(){
 
-await api(
-"/api/settings",
-{
+await api("/api/settings",{
 method:"PUT",
 headers:{
-"content-type":
-"application/json"
+"content-type":"application/json"
 },
 body:JSON.stringify({
-hero:hero.value,
-telegram:telegram.value,
-members:members.value,
-shares:shares.value
+hero:document.getElementById("hero").value,
+telegram:document.getElementById("telegram").value,
+members:document.getElementById("members").value,
+shares:document.getElementById("shares").value
 })
-}
-);
+});
 
-alert("Kaydedildi");
-
-}
-
-
-function esc(value){
-
-return String(value || "")
-.replace(
-/[&<>"']/g,
-char => ({
-"&":"&amp;",
-"<":"&lt;",
-">":"&gt;",
-'"':"&quot;",
-"'":"&#39;"
-}[char])
-);
+alert("Ayarlar kaydedildi.");
 
 }
 
-boot();
+async function loadPosts(){
+
+const posts=await api("/api/posts");
+
+const box=document.getElementById("posts");
+
+box.innerHTML="";
+
+posts.forEach(p=>{
+
+const div=document.createElement("div");
+
+div.className="post";
+
+div.innerHTML=
+"<b>"+escapeHtml(p.title)+"</b>"+
+"<br><span class='small'>"+
+escapeHtml(p.version||"")+
+" â¢ "+
+escapeHtml(p.status||"")+
+"</span>"+
+"<p>"+escapeHtml(p.description||"")+"</p>"+
+"<button class='red' onclick='deletePost("+
+p.id+
+")'>Sil</button>";
+
+box.appendChild(div);
+
+});
+
+}
+
+async function addPost(){
+
+await api("/api/posts",{
+method:"POST",
+headers:{
+"content-type":"application/json"
+},
+body:JSON.stringify({
+
+title:document.getElementById("title").value,
+version:document.getElementById("version").value,
+status:document.getElementById("status").value,
+description:document.getElementById("description").value,
+link:document.getElementById("link").value
+
+})
+});
+
+document.getElementById("title").value="";
+document.getElementById("version").value="";
+document.getElementById("description").value="";
+document.getElementById("link").value="";
+
+loadPosts();
+
+}
+
+async function deletePost(id){
+
+if(!confirm("Bu paylaÅÄ±m silinsin mi?")) return;
+
+await api("/api/posts/"+id,{
+method:"DELETE"
+});
+
+loadPosts();
+
+}
+
+function escapeHtml(text){
+
+return String(text)
+.replaceAll("&","&amp;")
+.replaceAll("<","&lt;")
+.replaceAll(">","&gt;")
+.replaceAll('"',"&quot;")
+.replaceAll("'","&#039;");
+
+}
+
+check();
 
 </script>
 
 </body>
-</html>`;
+</html>
+`;
