@@ -389,4 +389,3 @@ function esc(s){
 boot();
 </script>
 </body>
-</html>`;
