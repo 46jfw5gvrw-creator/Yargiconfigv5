@@ -1,8 +1,0 @@
-name = "yargiconfig-v5"
-main = "src/index.js"
-compatibility_date = "2026-09-16"
-
-[[d1_databases]]
-binding = "DB"
-database_name = "yargiconfig-db"
-database_id = "42ac5bb9-3a7e-45e8-b6df-d3539ae0a8bb"
